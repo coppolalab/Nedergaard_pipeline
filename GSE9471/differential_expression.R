@@ -14,13 +14,14 @@ library(openxlsx)
 
 library(rlist)
 library(reshape2)
-library(dplyr)
 library(purrr)
 library(magrittr)
 library(tidyr)
+library(dplyr)
 
 library(ggplot2)
 library(Cairo)
+library(tibble)
 
 source("../../FRDA project/common_functions.R")
 GSE9471.raw <- getGEO("GSE9471", destdir = "./save")[[1]]
@@ -49,11 +50,11 @@ GSE9471.collapse.expr <- collapseRows(GSE9471.expr, GSE9471.bm.filter$Symbol, ro
 GSE9471.collapse <- ExpressionSet(assayData = GSE9471.collapse.expr$datETcollapsed, phenoData = phenoData(GSE9471.annot))
 
 GSE9471.collapse$Wake <- grepl("ZT15|ZT21", GSE9471.collapse$Time.Point)
-GSE9471.model <- model.matrix( ~ Time.Point, pData(GSE9471.collapse))
+GSE9471.model <- model.matrix( ~ Wake, pData(GSE9471.collapse))
 colnames(GSE9471.model) %<>% str_replace("Condition", "") %>% make.names
 GSE9471.lm <- lmFit(GSE9471.collapse, GSE9471.model) %>% eBayes
 
-toptable.GSE9470 <- topTable(GSE9471.lm, coef = 2, n = Inf) %>% select(AveExpr, logFC, t:B)
-toptable.GSE9470$Symbol <- rownames(toptable.GSE9471)
-SaveRDSgz(toptable.GSE9470, "./save/toptable.GSE9471.rda")
+toptable.GSE9471 <- topTable(GSE9471.lm, coef = 2, n = Inf) %>% select(AveExpr, logFC, t:B) %>% as_tibble
+toptable.GSE9471$Symbol <- rownames(toptable.GSE9471)
+SaveRDSgz(toptable.GSE9471, "./save/toptable.GSE9471.rda")
 

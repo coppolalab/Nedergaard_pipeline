@@ -2,28 +2,21 @@ library(Biobase)
 library(annotate)
 library(WGCNA)
 library(biomaRt)
-library(broom)
-#library(RRHO)
 library(matrixStats)
-
 library(limma)
 library(edgeR)
 library(siggenes)
 
-library(stringr)
-library(readr)
 library(openxlsx)
-
-library(rlist)
-library(dplyr)
-library(purrr)
-library(magrittr)
-library(tidyr)
-
-library(ggplot2)
 library(Cairo)
 library(UpSetR)
 library(RColorBrewer)
+
+library(broom)
+library(rlist)
+library(stringr)
+library(magrittr)
+library(tidyverse)
 
 FormatTopTable <- function(coef.num, col.suffix, limma.object) {
     top.table <- topTable(limma.object, coef = coef.num, n = Inf) %>% signif(3) %>% data.frame
@@ -59,10 +52,11 @@ GenWorkbook <- function(dataset, filename, pval.name, fdr.name, log.name) {
 #Enrichr
 EnrichrSubmit <- function(column.suffix, top.table, pval.prefix, cutoff, enrichr.terms) {
     pval.column <- str_c(pval.prefix, "_", column.suffix)
+    log.column <- str_c("logFC_", column.suffix)
     filter.condition <- str_c(pval.column, " < ", cutoff)
-    top.filter <- filter_(top.table, filter.condition) %>% select_("Symbol", pval.column)
+    top.filter <- filter_(top.table, filter.condition) %>% select_("Symbol", pval.column, log.column)
     if (nrow(top.filter) > 1000) {
-        top.filter <- arrange_(top.filter, pval.column) %>% slice(1:1000)
+        top.filter <- arrange_(top.filter, str_c("desc(abs(", log.column, "))")) %>% slice(1:1000)
     }
     enrichr.data <- map(enrichr.terms, GetEnrichrData, top.filter)
     names(enrichr.data) <- enrichr.terms
@@ -93,7 +87,7 @@ MDSPlot <- function(filename, dataset, targetset, variablename) {
     dataset.plot <- left_join(dataset.plot, target.data)
 
     p <- ggplot(dataset.plot, aes_string(x = "Component.1", y = "Component.2", col = variablename)) + geom_point() 
-    p <- p + theme_bw() + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+    p <- p + theme_bw() + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), plot.title = element_text(hjust = 0.5))
     p <- p + xlab("Component 1") + ylab("Component 2") + ggtitle(variablename) + theme(plot.background = element_blank(), legend.background = element_blank())
     CairoPDF(filename, height = 6, width = 7, bg = "transparent")
    print(p)
@@ -108,7 +102,7 @@ VolcanoPlot <- function(column.suffix, top.table, threshold) {
 
     p <- ggplot(top.table, aes_string(x = log.format, y = "Log.Pvalue")) + geom_point(aes(color = Significant))
     p <- p + theme_bw() + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
-    p <- p + theme(legend.position = "none", plot.background = element_blank())
+    p <- p + theme(legend.position = "none", plot.background = element_blank(), plot.title = element_text(hjust = 0.5))
     p <- p + xlab("Log Fold Change") + ylab("-Log10 FDR P-value") + ggtitle(column.suffix)
     CairoPDF(str_c("volcano_", column.suffix), width = 5, height = 5, bg = "transparent")
     print(p)
@@ -123,7 +117,7 @@ DecidePlot <- function(file.name, decide.plot, y.lab, bar.padding = 100, pos.hju
     p <- p + geom_text(data = filter(decide.plot, Direction == "negative"), stat = "identity", size = 4, aes(x = Comparison, y = Num.Genes, ymin = min(Num.Genes) - nchar(abs(min(Num.Genes))) * bar.padding, hjust = neg.hjust, label = abs(Num.Genes)), position = position_dodge(width = 1))
     p <- p + theme_bw() + coord_flip() + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), plot.background = element_blank()) 
     p <- p + theme(axis.title.y = element_blank(), axis.ticks.y = element_blank(), axis.text.y = element_text(hjust = 0)) + ylab(y.lab)
-    p <- p + theme(panel.border = element_rect(size = 1, color = "black")) #+ facet_grid(Threshold + Total.Genes ~ .) 
+    p <- p + theme(panel.border = element_rect(size = 1, color = "black")) + facet_grid(Threshold + Total.Genes ~ .) 
     CairoPDF(file.name, width = 7, height = 6, bg = "transparent")
     print(p)
     dev.off()
@@ -139,25 +133,24 @@ GetSizes <- function(p.val, pval.column, log.column, dataset) {
 GetThresholds <- function(pval.column, log.column, dataset, thresholds, pval.label) {
     nums.table <- map(thresholds, GetSizes, pval.column, log.column, dataset) %>% reduce(rbind) %>% data.frame
     nums.table$Threshold <- str_c(pval.label, " < ", nums.table$Threshold)
+    nums.table$Comparison <- str_replace(pval.column, '^.*?_', '')
     return(nums.table)
 }
 
 TopGenesPlot <- function(pval.column, top.table, dge.list, group) {
     format.name <- str_replace(pval.column, "P.Value_", "")
-    top5.genes <- arrange_(top.table, pval.column)$Ensembl.Gene.ID[1:5]
     top5.symbol <- arrange_(top.table, pval.column)$Symbol[1:5]
-    top5.expr <- t(dge.list$E[top5.genes,])
-    colnames(top5.expr) <- top5.symbol
+    top5.expr <- t(dge.list$E[top5.symbol,])
     top5.df <- data.frame(Group = group, top5.expr) %>% gather(Gene, Expression, -Group)
     top5.df$Gene %<>% factor(levels = top5.symbol)
 
     p <- ggplot(top5.df, aes(x = Group, y = Expression, color = Group)) + geom_boxplot() + geom_jitter() + theme_bw()
     p <- p + facet_wrap(~ Gene, ncol = 5, scales = "free") + theme(legend.position = "none")
-    p <- p + theme(axis.text.x = element_text(angle = 45, hjust = 1), axis.title.x = element_blank())
+    p <- p + theme(plot.title = element_text(hjust = 0.5), axis.title.x = element_blank())
     p <- p + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.title.x = element_blank()) 
     p <- p + theme(plot.background = element_blank(), panel.border = element_rect(size = 1, color = "black"))
     p <- p + ggtitle(format.name)
-    CairoPDF(str_c("top5.", format.name), height = 4, width = 16, bg = "transparent")
+    CairoPDF(str_c("top5.", format.name), height = 3.5, width = 16, bg = "transparent")
     print(p)
     dev.off()
 }
@@ -173,7 +166,7 @@ EnrichrPlot <- function(enrichr.df, enrichr.expr, filename, plot.title, plot.hei
     enrichr.df$Log.Up <- -enrichr.df$Log.P.value * enrichr.df$Up / enrichr.df$Gene.Count
     enrichr.df$Log.Down <- -enrichr.df$Log.P.value * enrichr.df$Down / enrichr.df$Gene.Count
     enrichr.df$Term %<>% str_replace_all("\\ \\(.*$", "") %>% str_replace_all("\\_Homo.*$", "")  #Remove any thing after the left parenthesis and convert to all lower case
-    enrichr.df$Format.Name <- str_c(enrichr.df$Term, " (", enrichr.df$Gene.Count, ")")
+    enrichr.df$Format.Name <- str_c(enrichr.df$Databas, ": ", enrichr.df$Term, " (", enrichr.df$Gene.Count, ")")
     enrichr.df %<>% arrange(-Log.P.value)
     enrichr.df$Format.Name %<>% factor(levels = enrichr.df$Format.Name)
     enrichr.df.plot <- select(enrichr.df, Format.Name, Log.Up, Log.Down) %>% gather(Direction, Length, -Format.Name) 
@@ -197,7 +190,7 @@ UpDown <- function(filter.vector, enrichr.df) {
     enrichr.vector
 }
 
-FilterEnrichr <- function(enrichr.df, size = 100) {
+FilterEnrichr <- function(enrichr.df, size = 200) {
     enrichr.df$Num.Genes <- map(enrichr.df$Genes, str_split, ",") %>% map(extract2, 1) %>% map_int(length)
     enrichr.filter <- filter(enrichr.df, Num.Genes > 4) %>% filter(P.value < 0.05)
     if (nrow(enrichr.df) > size) {
@@ -209,7 +202,7 @@ FilterEnrichr <- function(enrichr.df, size = 100) {
 ensembl <- useMart("ensembl", dataset = "mmusculus_gene_ensembl")
 vega <- useMart("ENSEMBL_MART_VEGA", dataset = "mmusculus_gene_vega")
 
-targets <- read_csv("./target.csv") %>% data.frame
+targets <- read_csv("./target.csv")
 targets$group %<>% str_replace("\\(.*\\)", "") %>% factor
 SaveRDSgz(targets, "./save/targets.rda")
 raw.counts <- read.xlsx("../new_raw_data/2015-9201_metaReadCount_ensembl.xlsx") %>% data.frame
@@ -228,8 +221,10 @@ bm.filter <- filter(bm.table, nchar(Symbol) > 0 & !duplicated(Ensembl.Gene.ID))
 
 counts.annot <- counts.only[bm.filter$Ensembl.Gene.ID,]
 counts.collapse <- collapseRows(counts.annot, bm.filter$Symbol, rownames(counts.annot)) %>% extract2("datETcollapsed")
+symbols.real <- !grepl("^Gm[0-9]|Rik$", rownames(counts.collapse))
+counts.real <- counts.collapse[symbols.real,]
 
-counts.dge <- DGEList(counts.collapse)
+counts.dge <- DGEList(counts.real)
 counts.dge$samples$group <- targets$group
 counts.dgenorm <- calcNormFactors(counts.dge)
 SaveRDSgz(counts.dgenorm, "./save/counts.dgenorm.rda")
@@ -263,6 +258,7 @@ SaveRDSgz(voom.raw, "./save/voom.raw.rda")
 bm.ensembl <- getBM(attributes = c('mgi_symbol', 'description', 'gene_biotype'), filters = 'mgi_symbol', values = rownames(voom.tmm), mart = ensembl)
 bm.ensembl$description %<>% str_replace_all(" \\[.*\\]$", "")
 colnames(bm.ensembl) <- c("Symbol", "Description", "Gene.Type")
+bm.filter <- filter(bm.ensembl, !duplicated(Symbol))
 
 #combine.annot <- left_join(bm.ensembl, bm.vega) 
 #SaveRDSgz(combine.annot, "./save/combine.annot.rda")
@@ -270,7 +266,8 @@ colnames(bm.ensembl) <- c("Symbol", "Description", "Gene.Type")
 fit.voom <- lmFit(voom.tmm, design.matrix) %>% contrasts.fit(contrasts.all) %>% eBayes
 top.table.all <- map2(1:3, format.names, FormatTopTable, fit.voom) %>% 
     reduce(left_join) %>%
-    left_join(bm.ensembl) %>% 
+    as_tibble %>%
+    left_join(bm.filter) %>% 
     select(Symbol, Description, Gene.Type, dplyr::contains("logFC"), dplyr::contains("adj.P.Val"), dplyr::contains("P.Value"), AveExpr, dplyr::contains("t_"), dplyr::contains("B_"))
 SaveRDSgz(top.table.all, "./save/top.table.all.rda")
 
@@ -278,10 +275,6 @@ GenWorkbook(top.table.all, "table.annot.xlsx", "P.Value", "adj.P.Val", "logFC")
 
 ebam.list <- map(1:10, limma2ebam, fit = fit.voom)
 
-source("../../code/GO/enrichr.R")
-
-enrichr.terms <- c("GO_Biological_Process_2015", "GO_Molecular_Function_2015", "KEGG_2016", "Reactome_2016") 
-trap <- map(format.names, EnrichrSubmit, top.table.all, "adj.P.Val", 0.05, enrichr.terms)
 
 objects.size <- lapply(ls(), function(thing) print(object.size(get(thing)), units = 'auto')) 
 names(objects.size) <- ls()
@@ -289,7 +282,8 @@ unlist(objects.size) %>% sort
 
 #Figures
 mds.all <- t(voom.tmm$E) %>% dist(method = "manhattan") %>% cmdscale(eig = TRUE)
-MDSPlot("MDS.pdf", mds.all, targets, "group")
+targets$Group <- targets$group2
+MDSPlot("MDS.pdf", mds.all, targets, "Group")
 
 thresholds <- c(0.01, 0.005, 0.001)
 thresholds.fdr <- c(0.05, 0.01)
@@ -302,29 +296,22 @@ voom.logfc <- str_c("logFC", format.names, sep = "_")
 thresholds <- c(0.001, 0.01)
 thresholds.fdr <- c(0.05, 0.01)
 
-toptable.pval <- map2(voom.pval, voom.logfc, GetThresholds, top.table.all, thresholds, "P value")
-toptable.fdr <- map2(voom.fdr, voom.logfc, GetThresholds, top.table.all, thresholds.fdr, "FDR")
+toptable.pval <- map2_df(voom.pval, voom.logfc, GetThresholds, top.table.all, thresholds, "P value") 
+toptable.fdr <- map2_df(voom.fdr, voom.logfc, GetThresholds, top.table.all, thresholds.fdr, "FDR")
 
-names(toptable.pval) <- format.names
-names(toptable.fdr) <- format.names
-
-melt.pval.voom <- melt(toptable.pval)
-melt.fdr.voom <- melt(toptable.fdr)
 #melt.voom <- rbind(melt.pval.voom, melt.fdr.voom) 
-melt.voom <- melt.fdr.voom
-colnames(melt.voom)[2:4] <- c("Direction", "Num.Genes", "Comparison")
+melt.voom <- gather(toptable.fdr, Direction, Num.Genes, -Threshold, -Comparison)
 
-genetotals.voom <- dplyr::group_by(melt.voom, Threshold) %>% dplyr::summarise(sum(abs(Num.Genes)))
-colnames(genetotals.voom)[2] <- "Total.Genes"
+genetotals.voom <- group_by(melt.voom, Threshold) %>% summarise(Total.Genes = sum(abs(Num.Genes)))
 
-toptable.plot <- left_join(melt.voom, genetotals.voom) %>% filter(Threshold == "FDR < 0.05")
+toptable.plot <- left_join(melt.voom, genetotals.voom) #%>% filter(Threshold == "FDR < 0.05")
 toptable.plot$Threshold %<>% factor
 toptable.plot$Comparison %<>% str_replace_all("_", " ")
 
 DecidePlot("toptable_thresholds", toptable.plot, "Differentially Expressed Genes", bar.padding = 250)
 
 #Top Genes
-test <- map(voom.pval, TopGenesPlot, top.table.all, voom.tmm, targets$group)
+test <- map(voom.pval, TopGenesPlot, top.table.all, voom.tmm, targets$group2)
 
 #Heatmap
 #targets$colors <- labels2colors(targets$group, colorSeq = brewer.pal(n = 5, "Set1"))
@@ -334,7 +321,7 @@ test <- map(voom.pval, TopGenesPlot, top.table.all, voom.tmm, targets$group)
 #dev.off()
 
 #Volcano
-map(format.names, VolcanoPlot, top.table.all, 0.05)
+map(format.names, VolcanoPlot, top.table.all, 0.01)
 
 #Upset
 top.upset <- select(top.table.all, Symbol, dplyr::contains("adj.P.Val")) 
@@ -346,98 +333,124 @@ CairoPDF("upset.all", width = 30, height = 10)
 upset(fromList(top.list), nsets = 10, nintersects = NA, order.by = "freq")
 dev.off()
 
-source("../../FRDA project/common_functions.R")
+source("../../code/common_functions.R")
 
 #Enrichr plots
+source("../../code/GO/enrichr.R")
+enrichr.terms <- c("GO_Biological_Process_2015", "GO_Molecular_Function_2015", "KEGG_2016", "Reactome_2016") 
+trap <- map(format.names, EnrichrSubmit, top.table.all, "adj.P.Val", 0.01, enrichr.terms)
 
-#Patient vs. Control
-symbols.cleaned <- na.omit(top.table.all$Symbol)
-symbols.length <- map(symbols.cleaned, nchar) %>% reduce(c)
-symbols.final <- symbols.cleaned[symbols.length > 0]
+sds.symbols <- filter(top.table.all, adj.P.Val_Sleep_dep_vs_Sleep < 0.01) %>%
+    arrange(desc(abs(logFC_Sleep_dep_vs_Sleep))) %>% 
+    slice(1:1000) %>%
+    extract2("Symbol")
 
-s2d.gobiol.file <- "./enrichr/Sleep_grp2_vs_Sleep_dep/GO_Biological_Process_2015.xlsx"
-s2d.gobiol <- read.xlsx(s2d.gobiol.file) 
-s2d.gobiol.filter <- FilterEnrichr(s2d.gobiol)
-GetKappaCluster(file_path_sans_ext(s2d.gobiol.file), s2d.gobiol.filter, symbols.final)
-s2d.gobiol.final <- slice(s2d.gobiol.filter, c(1, 4, 13, 34, 11))
+sds.gobiol.file <- "./enrichr/Sleep_dep_vs_Sleep/GO_Biological_Process_2015.xlsx"
+sds.gobiol <- read.xlsx(sds.gobiol.file) %>% as_tibble
+sds.gobiol.filter <- FilterEnrichr(sds.gobiol)
+GetKappaCluster(file_path_sans_ext(sds.gobiol.file), sds.gobiol.filter, sds.symbols)
+sds.gobiol.final <- slice(sds.gobiol.filter, c(1, 4, 14))
+sds.gobiol.final$Database <- "GO BP"
 
-s2d.gomole.file <- "./enrichr/Sleep_grp2_vs_Sleep_dep/GO_Molecular_Function_2015.xlsx"
-s2d.gomole <- read.xlsx(s2d.gomole.file) 
-s2d.gomole.filter <- FilterEnrichr(s2d.gomole)
-GetKappaCluster(file_path_sans_ext(s2d.gomole.file), s2d.gomole.filter, symbols.final)
-s2d.gomole.final <- slice(s2d.gomole.filter, c(1))
+sds.gomole.file <- "./enrichr/Sleep_dep_vs_Sleep/GO_Molecular_Function_2015.xlsx"
+sds.gomole <- read.xlsx(sds.gomole.file) %>% as_tibble
+sds.gomole.filter <- FilterEnrichr(sds.gomole)
+GetKappaCluster(file_path_sans_ext(sds.gomole.file), sds.gomole.filter, sds.symbols)
+sds.gomole.final <- slice(sds.gomole.filter, c(9, 17))
+sds.gomole.final$Database <- "GO MF"
 
-s2d.reactome.file <- "./enrichr/Sleep_grp2_vs_Sleep_dep/Reactome_2016.xlsx"
-s2d.reactome <- read.xlsx(s2d.reactome.file) 
-s2d.reactome.filter <- FilterEnrichr(s2d.reactome)
-GetKappaCluster(file_path_sans_ext(s2d.reactome.file), s2d.reactome.filter, symbols.final)
-s2d.reactome.final <- slice(s2d.reactome.filter, c(5))
+sds.reactome.file <- "./enrichr/Sleep_dep_vs_Sleep/Reactome_2016.xlsx"
+sds.reactome <- read.xlsx(sds.reactome.file) %>% as_tibble()
+sds.reactome.filter <- FilterEnrichr(sds.reactome)
+GetKappaCluster(file_path_sans_ext(sds.reactome.file), sds.reactome.filter, sds.symbols)
+sds.reactome.final <- slice(sds.reactome.filter, c(1))
+sds.reactome.final$Database <- "Reactome"
 
-s2d.kegg.file <- "./enrichr/Sleep_grp2_vs_Sleep_dep/KEGG_2016.xlsx"
-s2d.kegg <- read.xlsx(s2d.kegg.file) 
-s2d.kegg.filter <- FilterEnrichr(s2d.kegg)
-GetKappaCluster(file_path_sans_ext(s2d.kegg.file), s2d.kegg.filter, symbols.final)
-s2d.kegg.final <- slice(s2d.kegg.filter, c(4))
+sds.kegg.file <- "./enrichr/Sleep_dep_vs_Sleep/KEGG_2016.xlsx"
+sds.kegg <- read.xlsx(sds.kegg.file) %>% as_tibble()
+sds.kegg.filter <- FilterEnrichr(sds.kegg)
+GetKappaCluster(file_path_sans_ext(sds.kegg.file), sds.kegg.filter, sds.symbols)
+sds.kegg.final <- slice(sds.kegg.filter, c(1))
+sds.kegg.final$Database <- "KEGG"
 
-s2d.enrichr.final <- rbind(s2d.gobiol.final, s2d.gomole.final, s2d.kegg.final)
-toptable.s2d.enrichr <- filter(top.table.all, !is.na(Symbol) & nchar(Symbol) > 0) %>% select(Symbol, logFC_Sleep_dep_vs_Sleep_grp2)
-colnames(toptable.s2d.enrichr)[2] <- "logFC"
-EnrichrPlot(s2d.enrichr.final, toptable.s2d.enrichr, "s2d.enrichr")
+sds.enrichr.final <- rbind(sds.gobiol.final, sds.gomole.final, sds.reactome.final, sds.kegg.final)
+toptable.sds.enrichr <- select(top.table.all, Symbol, logFC_Sleep_dep_vs_Sleep)
+colnames(toptable.sds.enrichr)[2] <- "logFC"
+EnrichrPlot(sds.enrichr.final, toptable.sds.enrichr, "sds.enrichr")
 
-w2d.gobiol.file <- "./enrichr/Wake_grp2_vs_Sleep_dep/GO_Biological_Process_2015.xlsx"
-w2d.gobiol <- read.xlsx(w2d.gobiol.file) 
-w2d.gobiol.filter <- FilterEnrichr(w2d.gobiol)
-GetKappaCluster(file_path_sans_ext(w2d.gobiol.file), w2d.gobiol.filter, symbols.final)
-w2d.gobiol.final <- slice(w2d.gobiol.filter, c(1, 2, 31, 20, 5))
+sdw.symbols <- filter(top.table.all, adj.P.Val_Sleep_dep_vs_Wake < 0.01) %>%
+    arrange(desc(abs(logFC_Sleep_dep_vs_Wake))) %>% 
+    slice(1:1000) %>%
+    extract2("Symbol")
 
-w2d.gomole.file <- "./enrichr/Wake_grp2_vs_Sleep_dep/GO_Molecular_Function_2015.xlsx"
-w2d.gomole <- read.xlsx(w2d.gomole.file) 
-w2d.gomole.filter <- FilterEnrichr(w2d.gomole)
-GetKappaCluster(file_path_sans_ext(w2d.gomole.file), w2d.gomole.filter, symbols.final)
-w2d.gomole.final <- slice(w2d.gomole.filter, c(5))
+sdw.gobiol.file <- "./enrichr/Sleep_dep_vs_Wake/GO_Biological_Process_2015.xlsx"
+sdw.gobiol <- read.xlsx(sdw.gobiol.file) %>% as_tibble
+sdw.gobiol.filter <- FilterEnrichr(sdw.gobiol)
+GetKappaCluster(file_path_sans_ext(sdw.gobiol.file), sdw.gobiol.filter, sdw.symbols)
+sdw.gobiol.final <- slice(sdw.gobiol.filter, c(1, 3, 6, 9))
+sdw.gobiol.final$Database <- "GO BP"
 
-w2d.reactome.file <- "./enrichr/Wake_grp2_vs_Sleep_dep/Reactome_2016.xlsx"
-w2d.reactome <- read.xlsx(w2d.reactome.file) 
-w2d.reactome.filter <- FilterEnrichr(w2d.reactome)
-GetKappaCluster(file_path_sans_ext(w2d.reactome.file), w2d.reactome.filter, symbols.final)
-w2d.reactome.final <- slice(w2d.reactome.filter, c(26, 2))
+sdw.gomole.file <- "./enrichr/Sleep_dep_vs_Wake/GO_Molecular_Function_2015.xlsx"
+sdw.gomole <- read.xlsx(sdw.gomole.file) %>% as_tibble
+sdw.gomole.filter <- FilterEnrichr(sdw.gomole)
+GetKappaCluster(file_path_sans_ext(sdw.gomole.file), sdw.gomole.filter, sdw.symbols)
+sdw.gomole.final <- slice(sdw.gomole.filter, c(1, 2))
+sdw.gomole.final$Database <- "GO MF"
 
-w2d.kegg.file <- "./enrichr/Wake_grp2_vs_Sleep_dep/KEGG_2016.xlsx"
-w2d.kegg <- read.xlsx(w2d.kegg.file) 
-w2d.kegg.filter <- FilterEnrichr(w2d.kegg)
-GetKappaCluster(file_path_sans_ext(w2d.kegg.file), w2d.kegg.filter, symbols.final)
-w2d.kegg.final <- slice(w2d.kegg.filter, c(4))
+sdw.reactome.file <- "./enrichr/Sleep_dep_vs_Wake/Reactome_2016.xlsx"
+sdw.reactome <- read.xlsx(sdw.reactome.file) %>% as_tibble
+sdw.reactome.filter <- FilterEnrichr(sdw.reactome)
+GetKappaCluster(file_path_sans_ext(sdw.reactome.file), sdw.reactome.filter, sdw.symbols)
+sdw.reactome.final <- slice(sdw.reactome.filter, c(2, 3))
+sdw.reactome.final$Database <- "Reactome"
 
-w2d.enrichr.final <- rbind(w2d.gobiol.final, w2d.gomole.final, w2d.reactome.final, w2d.kegg.final)
-toptable.w2d.enrichr <- filter(top.table.all, !is.na(Symbol) & nchar(Symbol) > 0) %>% select(Symbol, logFC_Sleep_dep_vs_Wake_grp2)
-colnames(toptable.w2d.enrichr)[2] <- "logFC"
-EnrichrPlot(w2d.enrichr.final, toptable.w2d.enrichr, "w2d.enrichr")
+sdw.kegg.file <- "./enrichr/Sleep_dep_vs_Wake/KEGG_2016.xlsx"
+sdw.kegg <- read.xlsx(sdw.kegg.file) %>% as_tibble
+sdw.kegg.filter <- FilterEnrichr(sdw.kegg)
+GetKappaCluster(file_path_sans_ext(sdw.kegg.file), sdw.kegg.filter, sdw.symbols)
+sdw.kegg.final <- slice(sdw.kegg.filter, c(2, 3))
+sdw.kegg.final$Database <- "KEGG"
 
-w2s.gobiol.file <- "./enrichr/Wake_grp2_vs_Sleep_grp2/GO_Biological_Process_2015.xlsx"
-w2s.gobiol <- read.xlsx(w2s.gobiol.file) 
-w2s.gobiol.filter <- FilterEnrichr(w2s.gobiol)
-GetKappaCluster(file_path_sans_ext(w2s.gobiol.file), w2s.gobiol.filter, symbols.final)
-w2s.gobiol.final <- slice(w2s.gobiol.filter, c(21, 25, 1, 5, 8))
+sdw.enrichr.final <- rbind(sdw.gobiol.final, sdw.gomole.final, sdw.reactome.final, sdw.kegg.final)
+toptable.sdw.enrichr <- select(top.table.all, Symbol, logFC_Sleep_dep_vs_Sleep)
+colnames(toptable.sdw.enrichr)[2] <- "logFC"
+EnrichrPlot(sdw.enrichr.final, toptable.sdw.enrichr, "sdw.enrichr")
 
-w2s.gomole.file <- "./enrichr/Wake_grp2_vs_Sleep_grp2/GO_Molecular_Function_2015.xlsx"
-w2s.gomole <- read.xlsx(w2s.gomole.file) 
-w2s.gomole.filter <- FilterEnrichr(w2s.gomole)
-GetKappaCluster(file_path_sans_ext(w2s.gomole.file), w2s.gomole.filter, symbols.final)
-w2s.gomole.final <- slice(w2s.gomole.filter, c(3,2))
+ws.symbols <- filter(top.table.all, adj.P.Val_Wake_vs_Sleep < 0.01) %>%
+    arrange(desc(abs(logFC_Wake_vs_Sleep))) %>% 
+    slice(1:1000) %>%
+    extract2("Symbol")
 
-w2s.reactome.file <- "./enrichr/Wake_grp2_vs_Sleep_grp2/Reactome_2016.xlsx"
-w2s.reactome <- read.xlsx(w2s.reactome.file) 
-w2s.reactome.filter <- FilterEnrichr(w2s.reactome)
-GetKappaCluster(file_path_sans_ext(w2s.reactome.file), w2s.reactome.filter, symbols.final)
+ws.gobiol.file <- "./enrichr/Wake_vs_Sleep/GO_Biological_Process_2015.xlsx"
+ws.gobiol <- read.xlsx(ws.gobiol.file) %>% as_tibble
+ws.gobiol.filter <- FilterEnrichr(ws.gobiol)
+GetKappaCluster(file_path_sans_ext(ws.gobiol.file), ws.gobiol.filter, ws.symbols)
+ws.gobiol.final <- slice(ws.gobiol.filter, c(1, 4, 6, 13))
+ws.gobiol.final$Database <- "GO BP"
 
-w2s.kegg.file <- "./enrichr/Wake_grp2_vs_Sleep_grp2/KEGG_2016.xlsx"
-w2s.kegg <- read.xlsx(w2s.kegg.file) 
-w2s.kegg.filter <- FilterEnrichr(w2s.kegg)
-GetKappaCluster(file_path_sans_ext(w2s.kegg.file), w2s.kegg.filter, symbols.final)
-w2s.kegg.final <- slice(w2s.kegg.filter, c(7))
+ws.gomole.file <- "./enrichr/Wake_vs_Sleep/GO_Molecular_Function_2015.xlsx"
+ws.gomole <- read.xlsx(ws.gomole.file) %>% as_tibble
+ws.gomole.filter <- FilterEnrichr(ws.gomole)
+GetKappaCluster(file_path_sans_ext(ws.gomole.file), ws.gomole.filter, ws.symbols)
+ws.gomole.final <- slice(ws.gomole.filter, c(1, 6))
+ws.gomole.final$Database <- "GO MF"
 
-w2s.enrichr.final <- rbind(w2s.gobiol.final, w2s.gomole.final, w2s.kegg.final)
-toptable.w2s.enrichr <- filter(top.table.all, !is.na(Symbol) & nchar(Symbol) > 0) %>% select(Symbol, logFC_Wake_grp2_vs_Sleep_grp2)
-colnames(toptable.w2s.enrichr)[2] <- "logFC"
-EnrichrPlot(w2s.enrichr.final, toptable.w2s.enrichr, "w2s.enrichr")
+ws.reactome.file <- "./enrichr/Wake_vs_Sleep/Reactome_2016.xlsx"
+ws.reactome <- read.xlsx(ws.reactome.file) %>% as_tibble
+ws.reactome.filter <- FilterEnrichr(ws.reactome)
+GetKappaCluster(file_path_sans_ext(ws.reactome.file), ws.reactome.filter, ws.symbols)
+ws.reactome.final <- slice(ws.reactome.filter, c(5))
+ws.reactome.final$Database <- "Reactome"
+
+ws.kegg.file <- "./enrichr/Wake_vs_Sleep/KEGG_2016.xlsx"
+ws.kegg <- read.xlsx(ws.kegg.file) %>% as_tibble
+ws.kegg.filter <- FilterEnrichr(ws.kegg)
+GetKappaCluster(file_path_sans_ext(ws.kegg.file), ws.kegg.filter, ws.symbols)
+ws.kegg.final <- slice(ws.kegg.filter, c(1, 2))
+ws.kegg.final$Database <- "KEGG"
+
+ws.enrichr.final <- rbind(ws.gobiol.final, ws.gomole.final, ws.kegg.final, ws.reactome.final)
+toptable.ws.enrichr <- select(top.table.all, Symbol, logFC_Sleep_dep_vs_Sleep)
+colnames(toptable.ws.enrichr)[2] <- "logFC"
+EnrichrPlot(ws.enrichr.final, toptable.ws.enrichr, "ws.enrichr", plot.width = 10)
 
